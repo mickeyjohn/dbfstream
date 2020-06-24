@@ -21,6 +21,11 @@ const fileTypes = {
   251: 'FoxBASE',
 };
 
+const HEADER = 0;
+const FIELDS = 1;
+const RECORDS = 2;
+const READ_BLOCKED = 99;
+
 const parseFileType = (buffer) => fileTypes[buffer.readUInt8(0, true)]
   ? fileTypes[buffer.readUInt8(0, true)]
   : 'uknown';
@@ -37,21 +42,13 @@ const parseDate = (buffer) => new Date(
 // 30 - 31: Reserved, contains 0x00
 const getHeader = (readStream) => {
   const buffer = readStream.read(32);
-
-  if (!buffer) {
-    throw `Unable to parse first 32 bytes from null header`;
-  }
-  if (buffer.length < 32) {
-    throw `Unable to parse first 32 bytes from header, found ${buffer.length} byte(s)`;
-  }
-
-  return {
+  return buffer ? {
     type: parseFileType(buffer),
     dateUpdated: parseDate(buffer.slice(1, 4)),
     numberOfRecords: buffer.readInt32LE(4, true),
     bytesOfHeader: buffer.readInt16LE(8, true),
-    LengthPerRecord: buffer.readInt16LE(10, true),
-  };
+    lengthPerRecord: buffer.readInt16LE(10, true),
+  } : undefined;
 };
 
 // 19 - 22	Value of autoincrement Next value
@@ -72,15 +69,17 @@ const getField = (buffer) => (
 
 const getListOfFields = (readStream, bytesOfHeader) => {
   const buffer = readStream.read(bytesOfHeader - 32);
-  const ListOfFields = [];
 
+  if (!buffer) return null;
+
+  const listOfFields = [];
   for (let i = 0, len = buffer.length; i < len; i += 32) {
     let field;
     if (field = getField(buffer.slice(i, i + 32))) {
-      ListOfFields.push(field);
+      listOfFields.push(field);
     }
   }
-  return ListOfFields;
+  return listOfFields;
 };
 
 const dataTypes = {
@@ -101,13 +100,13 @@ const parseDataByType = (data, type) => (
     : data  // default
 );
 
-const convertToObject = (data, ListOfFields, encoding, numOfRecord) => {
+const convertToObject = (data, listOfFields, encoding, numOfRecord) => {
   const row = {
     '@numOfRecord': numOfRecord,
     '@deleted': data.slice(0, 1)[0] !== 32,
   };
 
-  ListOfFields.reduce(function (acc, now) {
+  listOfFields.reduce(function (acc, now) {
     const value = iconv
       .decode(data.slice(acc, acc + now.length), encoding)
       .replace(/^\s+|\s+$/g, '');
@@ -118,44 +117,126 @@ const convertToObject = (data, ListOfFields, encoding, numOfRecord) => {
   return row;
 };
 
+/**
+ * DBF Stream is for reading a dbf file or stream
+ * @param {*} source  source file or stream
+ * @param {*} encoding endcoding, default utf-8
+ */
 const dbfStream = (source, encoding = 'utf-8') => {
   util.inherits(Readable, EventEmitter);
   const stream = new Readable({ objectMode: true });
-  // if source is already a readableStream, use it, otherwise treat as a filename
-  const readStream = isStream.readable(source) ? source : fs.createReadStream(source);
+  const _isStream = isStream.readable(source);
+  // If source is already a readableStream, use it, otherwise treat as a filename
+  const readStream = _isStream ? source : fs.createReadStream(source);
   let numOfRecord = 1;   //row number numOfRecord
 
-  const onData = () => {
-    if (stream.header && stream.header.listOfFields) {
-      let chunk;
-      while (null !== (chunk = readStream.read(stream.header.LengthPerRecord))) {
-        stream.push(convertToObject(chunk, stream.header.listOfFields, encoding, numOfRecord++));
-      }
+  _invalidTry = 0;
+  _readOn = false;
+  _readState = READ_BLOCKED;
+
+  const _onData = () => {
+    let readRes = true;
+    try {
+      // Loop while there was still data to process on the stream's internal buffer. 
+      // This will stop when we don't have enough readable data or encountering a back pressure issue;      
+      do {
+        switch (_readState) {
+          case HEADER:
+            stream.header = readRes = getHeader(readStream);
+            if (readRes) {
+              if (!stream.header.numberOfRecords || !stream.header.lengthPerRecord)
+                throw new Error('Empty dbf file');
+              // Check for physical size and header consistency
+              if (!_isStream && _size !== (stream.header.bytesOfHeader + (stream.header.numberOfRecords * stream.header.lengthPerRecord)))
+                throw new Error('Invalid dbf file');
+
+              _readState = FIELDS;
+            } else {
+              _checkReadTry();
+            }
+            break;
+          case FIELDS:
+            readRes = getListOfFields(readStream, stream.header.bytesOfHeader);
+            if (readRes) {
+              stream.header.listOfFields = readRes;
+
+              if (!stream.header.listOfFields.length)
+                throw new Error('No field dbf file');
+
+              stream.emit('header', stream.header);
+              _readState = RECORDS;
+            } else {
+              _checkReadTry();
+            }
+            break;
+          case RECORDS:
+            readRes = readStream.read(stream.header.lengthPerRecord);
+            if (readRes) {
+              // Push the message onto the read buffer for the consumer to read. We are mindful of slow reads by the consumer 
+              // and will respect backpressure signals.
+              if (stream.push(convertToObject(readRes, stream.header.listOfFields, encoding, numOfRecord++))) {
+                _readState = RECORDS;
+              } else {
+                _readState = READ_BLOCKED;
+                readRes = false;
+              }
+            }
+            break;
+          case READ_BLOCKED:
+            readRes = null;
+            break;
+          default:
+            throw new Error('Unknown read state');
+        }
+      } while (readRes);
+    } catch (err) {
+      _errorHandler(err);
+    }
+  };
+
+  const _checkReadTry = () => {
+    _invalidTry++;
+    if (_invalidTry >= 3)
+      throw new Error('Corrupted or not a dbf file !');
+  }
+
+  const _errorHandler = (err) => {
+    if (readStream) {
+      readStream.pause();
+      readStream.emit('end');
+    }
+    if (stream) {
+      stream.emit('error', err);
+      stream.push(null);
     }
   }
 
   readStream._maxListeners = Infinity;
-  //read file header first
-  readStream.once('readable', () => {
-    try {
-      stream.header = getHeader(readStream);
-      stream.header.listOfFields = getListOfFields(readStream, stream.header.bytesOfHeader);
-      stream.emit('header', stream.header);
-    }
-    catch (err) {
-      stream.emit('error', err);
-      stream.push(null);
-    }
-  });
+
+  const _onDataFunc = () => setImmediate(() => _onData());
 
   readStream.once('end', () => {
-    readStream.removeListener('readable', onData);
-    stream.push(null)
+    readStream.removeListener('readable', _onDataFunc);
+    stream.push(null);
   });
 
   stream._read = () => {
-    readStream.on('readable', onData);
+    if (!_readOn) {
+      readStream.on('readable', _onDataFunc);
+      _readOn = true;
+    }
   };
+
+  if (!_isStream) {
+    fs.stat(source, (err, stat) => {
+      if (err) return _errorHandler(err);
+      _size = stat.size;
+      _readState = HEADER;
+    });
+  }
+  else {
+    _readState = HEADER;
+  }
 
   return stream;
 };
