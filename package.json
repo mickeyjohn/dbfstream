@@ -1,6 +1,6 @@
 {
   "name": "dbfstream",
-  "version": "1.0.24",
+  "version": "2.0.0",
   "description": "a dbf parser - stream version (based on https://github.com/tamtakoe/node-dbf)",
   "main": "index.js",
   "scripts": {
@@ -14,20 +14,20 @@
     "dbf",
     "stream"
   ],
-  "author": "MichaelQQ",
+  "author": "MichaelQQ, Trung Hoang",
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/MichaelQQ/dbfstream/issues"
   },
   "homepage": "https://github.com/MichaelQQ/dbfstream#readme",
   "dependencies": {
-    "iconv-lite": "^0.4.13",
-    "is-stream": "^1.1.0"
+    "iconv-lite": "^0.6.0",
+    "is-stream": "^2.0.0"
   },
   "devDependencies": {
-    "babel-tape-runner": "^2.0.1",
+    "babel-tape-runner": "^3.0.0",
     "deep-freeze": "0.0.1",
-    "tap-spec": "^4.1.1",
-    "tape": "^4.6.0"
+    "tap-spec": "^5.0.0",
+    "tape": "^5.0.0"
   }
 }

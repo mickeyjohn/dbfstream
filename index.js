@@ -122,7 +122,7 @@ const convertToObject = (data, listOfFields, encoding, numOfRecord) => {
  * @param {*} source  source file or stream
  * @param {*} encoding endcoding, default utf-8
  */
-const dbfStream = (source, encoding = 'utf-8') => {
+const dbfStream = (source, encoding = 'utf-8', checkSize = false) => {
   util.inherits(Readable, EventEmitter);
   const stream = new Readable({ objectMode: true });
   const _isStream = isStream.readable(source);
@@ -147,7 +147,7 @@ const dbfStream = (source, encoding = 'utf-8') => {
               if (!stream.header.numberOfRecords || !stream.header.lengthPerRecord)
                 throw new Error('Empty dbf file');
               // Check for physical size and header consistency
-              if (!_isStream && _size !== (stream.header.bytesOfHeader + (stream.header.numberOfRecords * stream.header.lengthPerRecord)))
+              if (checkSize && !_isStream && _size !== (stream.header.bytesOfHeader + (stream.header.numberOfRecords * stream.header.lengthPerRecord)))
                 throw new Error('Invalid dbf file');
 
               _readState = FIELDS;
@@ -227,7 +227,7 @@ const dbfStream = (source, encoding = 'utf-8') => {
     }
   };
 
-  if (!_isStream) {
+  if (checkSize && !_isStream) {
     fs.stat(source, (err, stat) => {
       if (err) return _errorHandler(err);
       _size = stat.size;
